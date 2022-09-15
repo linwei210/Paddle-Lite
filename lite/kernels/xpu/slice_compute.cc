@@ -152,6 +152,8 @@ void SliceCompute<T>::Run() {
     need_infer = true;
   }
 
+  // std::cout << "==== debug === " << "need_infer: " << need_infer << ", StartsTensorList.size(): " << StartsTensorList.size()
+  //   << ", EndsTensorList.size(): " << EndsTensorList.size()  << ", debug_input_name: " << param.debug_input_name << std::endl;
   if (need_infer) {
     if (StartsTensor) {
       starts = GetIntDataFromTensor(StartsTensor);

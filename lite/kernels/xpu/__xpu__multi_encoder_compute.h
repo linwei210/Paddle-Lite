@@ -48,6 +48,8 @@ class XPUMultiEncoderCompute
   XPUScratchPadGuard input_max_guard_;
   XPUScratchPadGuard cast_in_guard_;
   XPUScratchPadGuard cast_out_guard_;
+  XPUScratchPadGuard cos_buffer_;
+  XPUScratchPadGuard sin_buffer_;
   xdnn::Activation_t qkv_act = xdnn::Activation_t::RELU;
   int slice_idx = -1;
   bool local_quant_ = false;

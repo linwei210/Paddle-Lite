@@ -140,6 +140,43 @@ void XPUMultiEncoderCompute::prepare_weight_max(
   }
 }
 
+  template <typename T>
+  double compute_mean(const T* in, const size_t length) {
+    double sum = 0.;
+    for (size_t i = 0; i < length; ++i) {
+      sum += in[i];
+    }
+    return sum / length;
+  }
+
+  template <typename T>
+  double compute_standard_deviation(const T* in,
+                                    const size_t length,
+                                    bool has_mean = false,
+                                    double mean = 10000) {
+    if (!has_mean) {
+      mean = compute_mean<T>(in, length);
+    }
+
+    double variance = 0.;
+    for (size_t i = 0; i < length; ++i) {
+      variance += pow((in[i] - mean), 2);
+    }
+    variance /= length;
+    return sqrt(variance);
+  }
+
+    template <typename T>
+  double compute_average_grow_rate(const T* in, const size_t length) {
+    const double eps = 1e-5;
+    double ave_grow_rate = 0.0f;
+    for (size_t i = 1; i < length; ++i) {
+      ave_grow_rate += (in[i] - in[i - 1]) / (in[i - 1] + eps);
+    }
+    ave_grow_rate /= length;
+    return ave_grow_rate;
+  }
+
 void XPUMultiEncoderCompute::PrepareForRun() {
   auto& ctx = this->ctx_->template As<XPUContext>();
   auto& param = this->template Param<param_t>();
@@ -201,12 +238,60 @@ void XPUMultiEncoderCompute::PrepareForRun() {
   // prepare input_cast and output_cast guard_
   cast_in_guard_ = TargetWrapperXPU::MallocScratchPad(4 * 1024 * 1024);
   cast_out_guard_ = TargetWrapperXPU::MallocScratchPad(4 * 1024 * 1024);
+
+  //cos
+  if (param.cos && GetBoolFromEnv("XPU_ENABLE_ROPE_KERNEL")) {
+    std::cout << "cos buffer size: " << param.cos->memory_size() << ", dim" << param.cos->dims() << std::endl;
+    std::cout << "sin buffer size: " << param.sin->memory_size() << ", dim" << param.sin->dims() << std::endl;
+    cos_buffer_ = TargetWrapperXPU::MallocScratchPad(param.cos->memory_size());
+    sin_buffer_ = TargetWrapperXPU::MallocScratchPad(param.sin->memory_size());
+    auto cos_ptr = param.cos->data<float>();
+    auto mean = compute_mean<float>(cos_ptr, param.cos->numel());
+    auto std = compute_standard_deviation<float>(cos_ptr, param.cos->numel(), true, mean);
+    auto agr = compute_average_grow_rate<float>(cos_ptr, param.cos->numel());
+    std::cout << "cos one samples: mean is " << mean << ", std is " << std << ", agr " << agr << ", numel " << param.cos->numel()  << std::endl;
+    for (int i = 0; i < 26; i ++) {
+      std::cout << cos_ptr[20 * 26 + i] << " ";
+      if (i == 12) {
+        std::cout << std::endl;
+      }
+    }
+    auto sin_ptr = param.sin->data<float>();
+    mean = compute_mean<float>(sin_ptr, param.sin->numel());
+    std = compute_standard_deviation<float>(sin_ptr, param.sin->numel(), true, mean);
+    agr = compute_average_grow_rate<float>(sin_ptr, param.sin->numel());
+    std::cout << "\nsin one samples: mean is " << mean << ", std is " << std << ", agr " << agr << ", numel " << param.sin->numel()  << std::endl;
+    for (int i = 0; i < 26; i ++) {
+      std::cout << sin_ptr[20 * 26 + i] << " ";
+      if (i == 12) {
+        std::cout << std::endl;
+      }
+    }
+    std::cout << std::endl;
+
+    lite::TargetWrapperXPU::MemcpySync(cos_buffer_->addr_,
+                                        param.cos->data<float>(),
+                                        param.cos->memory_size(),
+                                        IoDirection::HtoD);
+    lite::TargetWrapperXPU::MemcpySync(sin_buffer_->addr_,
+                                      param.sin->data<float>(),
+                                      param.sin->memory_size(),
+                                      IoDirection::HtoD);
+  }
 }
 
 template <typename T, typename TW, typename TGEMM>
 void XPUMultiEncoderCompute::run_encoder(const T* in, T* out) {
   auto& param = this->template Param<param_t>();
   auto& ctx = this->ctx_->template As<XPUContext>();
+  const float* cos_buffer = nullptr;
+  const float* sin_buffer = nullptr;
+  if (param.cos && GetBoolFromEnv("XPU_ENABLE_ROPE_KERNEL")) {
+    cos_buffer = reinterpret_cast<const float*>(cos_buffer_->addr_);
+  }
+  if (param.sin && GetBoolFromEnv("XPU_ENABLE_ROPE_KERNEL")) {
+    sin_buffer = reinterpret_cast<const float*>(sin_buffer_->addr_);
+  }
 
   xdnn::VectorParam<int> query_lod;
   if (param.SeqLod && param.SeqLod->data<int>()) {
@@ -220,7 +305,7 @@ void XPUMultiEncoderCompute::run_encoder(const T* in, T* out) {
                                       param.size_per_head,
                                       qkv_act,
                                       slice_idx,
-                                      true /* qkv fusion */,
+                                      param.enable_qkv_fusion /* qkv fusion */,
                                       max_pad_seqlen,
                                       param.hidden_dim,
                                       param.norm_before, /*is_pre_norm*/
@@ -240,7 +325,8 @@ void XPUMultiEncoderCompute::run_encoder(const T* in, T* out) {
         arg_fc_bias_,
         arg_ln_scale_,
         arg_ln_bias_,
-        qkv_attn_param);
+        qkv_attn_param,
+        nullptr, cos_buffer, sin_buffer);
     CHECK_EQ(r, 0);
   } else {
     // no vsl
@@ -257,7 +343,7 @@ void XPUMultiEncoderCompute::run_encoder(const T* in, T* out) {
                                       encoder_mask_shape,
                                       qkv_act,
                                       slice_idx,
-                                      true,
+                                      param.enable_qkv_fusion,
                                       param.hidden_dim,
                                       param.norm_before);
     qkv_attn_param.quant_type_.assign(quant_types_.begin(), quant_types_.end());
@@ -272,7 +358,7 @@ void XPUMultiEncoderCompute::run_encoder(const T* in, T* out) {
         arg_ln_scale_,
         arg_ln_bias_,
         qkv_attn_param,
-        param.mask->data<float>());
+        param.mask->data<float>(), cos_buffer, sin_buffer);
     CHECK_EQ(r, 0);
   }
 }
@@ -368,5 +454,7 @@ REGISTER_LITE_KERNEL(__xpu__multi_encoder,
     .BindInput("LNScale", {LiteType::GetTensorTy(TARGET(kXPU))})
     .BindInput("LNBias", {LiteType::GetTensorTy(TARGET(kXPU))})
     .BindInput("Mask", {LiteType::GetTensorTy(TARGET(kXPU))})
+    .BindInput("Cos", {LiteType::GetTensorTy(TARGET(kXPU))})
+    .BindInput("Sin", {LiteType::GetTensorTy(TARGET(kXPU))})
     .BindOutput("Output", {LiteType::GetTensorTy(TARGET(kXPU))})
     .Finalize();

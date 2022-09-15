@@ -205,14 +205,14 @@ class XPUFcFuser : public FuseBase {
           matched.at("mul")->stmt()->op_info()->GetAttr<bool>("transpose_X"));
       op_desc.SetAttr(
           "transpose_w",
-          matched.at("mul")->stmt()->op_info()->GetAttr<bool>("transpose_Y"));
+          !matched.at("mul")->stmt()->op_info()->GetAttr<bool>("transpose_Y"));  // w_trans=true for better performance
     } else {
       op_desc.SetAttr(
           "transpose_x",
           matched.at("mul")->stmt()->op_info()->GetAttr<bool>("trans_x"));
       op_desc.SetAttr(
           "transpose_w",
-          matched.at("mul")->stmt()->op_info()->GetAttr<bool>("trans_y"));
+          !matched.at("mul")->stmt()->op_info()->GetAttr<bool>("trans_y")); // w_trans=true for better performance
     }
 
     std::string max_output_name = output_name + "_xpu_max";

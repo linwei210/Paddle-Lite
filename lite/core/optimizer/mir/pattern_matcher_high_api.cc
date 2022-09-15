@@ -26,6 +26,10 @@ void FuseBase::PerformPatternMatcher(SSAGraph *graph) {
     // get all the reigistered nodes.
     key2nodes_.emplace_back();
     for (auto &item : nodes_) {
+      std::cout << item.second->name() << std::endl;
+      if (subgraph.find(item.second) == subgraph.end()) {
+        std::cout << "ERROR, don't find " << item.second->name() << std::endl;
+      }
       key2nodes_.back()[item.first] = subgraph.at(item.second);
     }
   };

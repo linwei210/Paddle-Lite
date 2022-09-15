@@ -50,14 +50,16 @@ class XPUSingleEncoderFuser : public FuseBase {
                                  const std::string& matmul_type = "matmul",
                                  const std::string& mul_type = "mul",
                                  bool with_q_scale = true,
-                                 bool norm_before = false)
+                                 bool norm_before = false,
+                                 bool rope = false)
       : act_type_(act_type),
         input_pos_(input_pos),
         qkv_ln_2_out_pos_(qkv_ln_2_out_pos),
         matmul_type_(matmul_type),
         mul_type_(mul_type),
         with_q_scale_(with_q_scale),
-        norm_before_(norm_before) {}
+        norm_before_(norm_before),
+        rope_(rope) {}
 
   void BuildPattern() override {
     auto* input = VarNode("input")
@@ -116,19 +118,37 @@ class XPUSingleEncoderFuser : public FuseBase {
                                   ->assert_is_op_output("reshape2", "XShape")
                                   ->AsIntermediate();
     std::string target_op_type = matmul_type_;
-    if (with_q_scale_) {
+    std::string target_input_name = "X";
+    if (rope_) {
+      target_op_type = "__xpu__rope";
+      target_input_name = "Input";
+    } else if (with_q_scale_) {
       target_op_type = "scale";
     }
     auto* q_transpose2 = OpNode("q_transpose2", "transpose2")->AsIntermediate();
     auto* q_transpose2_out = VarNode("q_transpose2_out")
                                  ->assert_is_op_output("transpose2", "Out")
-                                 ->assert_is_op_input(target_op_type, "X")
+                                 ->assert_is_op_input(target_op_type, target_input_name)
                                  ->AsIntermediate();
     auto* q_transpose2_xshape =
         VarNode("q_transpose2_xshape")
             ->assert_is_op_output("transpose2", "XShape")
             ->AsIntermediate();
 
+    std::string q_rope_next_op = with_q_scale_ ? "scale" : matmul_type_;
+    PMNode* q_rope_op = nullptr;
+    PMNode* q_rope_out = nullptr;
+    PMNode* q_cos = nullptr;
+    PMNode* q_sin = nullptr;
+    if (rope_) {
+       q_cos = VarNode("q_cos")->assert_is_op_input("__xpu__rope", "Cos")->AsInput();
+       q_sin = VarNode("q_sin")->assert_is_op_input("__xpu__rope", "Sin")->AsInput();
+       q_rope_op = OpNode("q_rope_op", "__xpu__rope")->AsIntermediate();;
+       q_rope_out = VarNode("q_rope_out")
+                        ->assert_is_op_output("__xpu__rope", "Output")
+                        ->assert_is_op_input(q_rope_next_op, "X")
+                        ->AsIntermediate();
+    }
     PMNode* q_scale = nullptr;
     PMNode* q_scale_out = nullptr;
     if (with_q_scale_) {
@@ -163,14 +183,29 @@ class XPUSingleEncoderFuser : public FuseBase {
                                   ->assert_is_op_output("reshape2", "XShape")
                                   ->AsIntermediate();
     auto* k_transpose2 = OpNode("k_transpose2", "transpose2")->AsIntermediate();
+    auto k_transpose2_next_op = rope_ ? "__xpu__rope" : matmul_type_;
+    auto k_transpose2_next_input_name = rope_ ? "Input" : "Y";
     auto* k_transpose2_out = VarNode("k_transpose2_out")
                                  ->assert_is_op_output("transpose2", "Out")
-                                 ->assert_is_op_input(matmul_type_, "Y")
+                                 ->assert_is_op_input(k_transpose2_next_op, k_transpose2_next_input_name)
                                  ->AsIntermediate();
     auto* k_transpose2_xshape =
         VarNode("k_transpose2_xshape")
             ->assert_is_op_output("transpose2", "XShape")
             ->AsIntermediate();
+    PMNode* k_rope_op = nullptr;
+    PMNode* k_rope_out = nullptr;
+    // PMNode* k_cos = nullptr;
+    // PMNode* k_sin = nullptr;
+    if (rope_) {
+      //  k_cos = VarNode("k_cos")->assert_is_op_input("__xpu__rope", "Cos")->AsInput();
+      //  k_sin = VarNode("k_sin")->assert_is_op_input("__xpu__rope", "Sin")->AsInput();
+       k_rope_op = OpNode("k_rope_op", "__xpu__rope")->AsIntermediate();;
+       k_rope_out = VarNode("k_rope_out")
+                        ->assert_is_op_output("__xpu__rope", "Output")
+                        ->assert_is_op_input(matmul_type_, "Y")
+                        ->AsIntermediate();
+    }
 
     auto* qk_matmul = OpNode("qk_matmul", matmul_type_)->AsIntermediate();
     auto* qk_matmul_out = VarNode("qk_matmul_out")
@@ -377,14 +412,20 @@ class XPUSingleEncoderFuser : public FuseBase {
     } else {
       *input >> *q_mul;
     }
-    if (with_q_scale_) {
-      *q_mul >> *q_mul_out >> *q_add >> *q_add_out >> *q_reshape2 >>
-          *q_reshape2_out >> *q_transpose2 >> *q_transpose2_out >> *q_scale >>
-          *q_scale_out >> *qk_matmul;
-    } else {
-      *q_mul >> *q_mul_out >> *q_add >> *q_add_out >> *q_reshape2 >>
-          *q_reshape2_out >> *q_transpose2 >> *q_transpose2_out >> *qk_matmul;
+    *q_mul >> *q_mul_out >> *q_add >> *q_add_out >> *q_reshape2 >>
+        *q_reshape2_out >> *q_transpose2 >> *q_transpose2_out;
+    auto cur_node = q_transpose2_out;
+    if (rope_) {
+      *cur_node >> *q_rope_op >> *q_rope_out;
+      *q_cos >> *q_rope_op;
+      *q_sin >> *q_rope_op;
+      cur_node = q_rope_out;
     }
+    if (with_q_scale_) {
+     *cur_node >> *q_scale >> *q_scale_out;
+     cur_node = q_scale_out;
+    }
+    *cur_node >> *qk_matmul;
     *q_mul_y >> *q_mul;
     *q_add_y >> *q_add;
     *q_reshape2 >> *q_reshape2_xshape;
@@ -396,7 +437,15 @@ class XPUSingleEncoderFuser : public FuseBase {
       *input >> *k_mul;
     }
     *k_mul >> *k_mul_out >> *k_add >> *k_add_out >> *k_reshape2 >>
-        *k_reshape2_out >> *k_transpose2 >> *k_transpose2_out >> *qk_matmul;
+        *k_reshape2_out >> *k_transpose2 >> *k_transpose2_out;
+    cur_node = k_transpose2_out;
+    if (rope_) {
+      *cur_node >> *k_rope_op >> *k_rope_out;
+      *q_cos >> *k_rope_op;
+      *q_sin >> *k_rope_op;
+      cur_node = k_rope_out;
+    }
+    *cur_node >> *qk_matmul;
 
     *k_mul_y >> *k_mul;
     *k_add_y >> *k_add;
@@ -476,6 +525,17 @@ class XPUSingleEncoderFuser : public FuseBase {
                          matched.at("qkv_add_3_y")->arg()->name,
                          matched.at("qkv_add_4_y")->arg()->name,
                      });
+    if (rope_) {
+      op_desc.SetInput("Cos",
+                       {
+                           matched.at("q_cos")->arg()->name
+                       });
+      op_desc.SetInput("Sin",
+                  {
+                      matched.at("q_sin")->arg()->name
+                  });
+      op_desc.SetAttr<bool>("has_rope", true);
+    }
     if (norm_before_) {
       op_desc.SetInput("LNScale",
                        {
@@ -573,6 +633,10 @@ class XPUSingleEncoderFuser : public FuseBase {
         "qkv_ln_2_scale",
         "qkv_ln_2_bias",
     };
+    if (rope_) {
+      froms.push_back("q_cos");
+      froms.push_back("q_sin");
+    }
     if (norm_before_) {
       froms.push_back("ln_before_scale");
       froms.push_back("ln_before_bias");
@@ -599,6 +663,7 @@ class XPUSingleEncoderFuser : public FuseBase {
   std::string mul_type_;
   bool with_q_scale_;
   bool norm_before_;
+  bool rope_;
   // quant_info: mul input_max, output_max * 6 + matmul x_max:y_max, output_max
   // * 2
   void set_quant_info(Scope* scope,
@@ -923,11 +988,42 @@ class XPUMultiEncoderFuser {
           to_remove.insert(cur_encoder);
           DirectedLink(first_encoder, cur_out);
           out_name = op_info->Output("Outputs").front();
+          std::cout << "Last encoder outputs: ";
+          for (auto& name : op_info->Output("Outputs")) {
+            std::cout << name << ", ";
+          }
+          std::cout << std::endl;
         } else {
           to_remove.insert(cur_encoder);
           to_remove.insert(cur_out);
         }
       }
+      std::string cos_name, sin_name;
+      bool has_rope = first_encoder_op_info->HasAttr("has_rope") &&
+                      first_encoder_op_info->GetAttr<bool>("has_rope");
+      if (has_rope) {
+        std::cout << "Only keep the first encoder's cos&sin buffer" << std::endl;
+        cos_name = first_encoder_op_info->Input("Cos").front();
+        sin_name = first_encoder_op_info->Input("Sin").front();
+        auto* first_cos_node = graph->RetrieveArgument(cos_name);
+        auto* first_sin_node = graph->RetrieveArgument(sin_name);
+        for (size_t i = 1; i < all_encoders.size(); ++i) {
+          auto* op_info = all_encoders[i]->stmt()->op_info();
+          auto* cos_node = graph->RetrieveArgument(op_info->Input("Cos").front());
+          auto* sin_node = graph->RetrieveArgument(op_info->Input("Sin").front());
+          if (cos_node != first_cos_node) {  // remove redundent sin&cos buffer
+            std::cout << "remove redundent cos buffer" << std::endl;
+            to_remove.insert(cos_node);
+          }
+          if (sin_node != first_sin_node) {
+            std::cout << "remove redundent sin buffer" << std::endl;
+            to_remove.insert(sin_node);
+          }
+        }
+        to_remove.insert(first_cos_node);
+        to_remove.insert(first_sin_node);
+      }
+
       GraphSafeRemoveNodes(graph, to_remove);
 
       cpp::OpDesc op_desc;
@@ -937,6 +1033,11 @@ class XPUMultiEncoderFuser {
         op_desc.SetInput(kv.first, kv.second);
       }
       op_desc.SetInput("Mask", {mask_name});
+      if (has_rope) {
+        std::cout << "Set Cos/Sin as Inputs of multi encoder!" << std::endl;
+        op_desc.SetInput("Cos", {cos_name});
+        op_desc.SetInput("Sin", {sin_name});
+      }
       op_desc.SetOutput("Output", {out_name});
       op_desc.SetAttr<int>("xpu", 1);
       op_desc.SetAttr<bool>("norm_before", norm_before_0);
@@ -973,7 +1074,7 @@ class XPUMultiEncoderFuser {
       op_desc.SetAttr<bool>("per_channel", per_channel);
 
       // q/k/v fusion
-      bool enable_qkv_fusion = true;
+      bool enable_qkv_fusion = GetBoolFromEnv("XPU_QKV_FUSION");
       op_desc.SetAttr<bool>("enable_qkv_fusion", enable_qkv_fusion);
 
       auto* scope = multi_encoder_stmt->op()->scope();
@@ -1252,6 +1353,7 @@ class XPUMultiEncoderFuser {
 class XPUMultiEncoderFusePass : public ProgramPass {
  public:
   void Apply(const std::unique_ptr<SSAGraph>& graph) override {
+    if (!GetBoolFromEnv("XPU_ENABLE_ME")) return;
     if (GetBoolFromEnv("XPU_ENABLE_XTCL")) return;
     // TODO(miaotianxiang): backup graph, recover from failed match
     std::vector<std::string> act_types{"gelu", "relu"};
@@ -1261,6 +1363,17 @@ class XPUMultiEncoderFusePass : public ProgramPass {
     std::vector<std::string> mul_types{"mul", "matmul", "matmul_v2"};
     std::vector<bool> with_q_scales{true, false};
     std::vector<bool> norm_befores{true, false};
+    std::vector<bool> ropes{true, false};
+
+    // for rope testing
+    // std::vector<std::string> act_types{"relu"};
+    // std::vector<std::string> input_poss{"X"};
+    // std::vector<std::string> qkv_ln_2_out_poss{"X"};
+    // std::vector<std::string> matmul_types{"matmul_v2"};
+    // std::vector<std::string> mul_types{"matmul_v2"};
+    // std::vector<bool> with_q_scales{true};
+    // std::vector<bool> norm_befores{false};
+    // std::vector<bool> ropes{true};
 
     std::string fc_precision;
     bool adaptive_seqlen = false;
@@ -1300,18 +1413,21 @@ class XPUMultiEncoderFusePass : public ProgramPass {
             for (auto& mul_type : mul_types) {
               for (auto with_q_scale : with_q_scales) {
                 for (auto norm_before : norm_befores) {
-                  fusion::XPUSingleEncoderFuser single_encoder_fuser(
-                      act_type,
-                      input_pos,
-                      qkv_ln_2_out_pos,
-                      matmul_type,
-                      mul_type,
-                      with_q_scale,
-                      norm_before);
-                  single_encoder_fuser(graph.get());
-                  fusion::XPUMultiEncoderFuser multi_encoder_fuser(
-                      fc_precision, adaptive_seqlen);
-                  multi_encoder_fuser(graph.get());
+                  for (auto rope : ropes) {
+                    fusion::XPUSingleEncoderFuser single_encoder_fuser(
+                        act_type,
+                        input_pos,
+                        qkv_ln_2_out_pos,
+                        matmul_type,
+                        mul_type,
+                        with_q_scale,
+                        norm_before,
+                        rope);
+                    single_encoder_fuser(graph.get());
+                    fusion::XPUMultiEncoderFuser multi_encoder_fuser(
+                        fc_precision, adaptive_seqlen);
+                    multi_encoder_fuser(graph.get());
+                  }
                 }
               }
             }

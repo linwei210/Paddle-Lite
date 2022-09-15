@@ -100,9 +100,13 @@ void PatternMatcher::operator()(SSAGraph *graph,
   }
 
   auto subgraphs = DetectPatterns();
+  LOG(INFO) << "early detected " << subgraphs.size() << " subgraph";
   UniquePatterns(&subgraphs);
+  LOG(INFO) << "early detected2 " << subgraphs.size() << " subgraph";
   ValidateByNodeRole(&subgraphs);
+  LOG(INFO) << "early detected3 " << subgraphs.size() << " subgraph";
   RemoveOverlappedMatch(&subgraphs);
+  LOG(INFO) << "early detected4 " << subgraphs.size() << " subgraph";
 
   if (subgraphs.empty()) return;
   LOG(INFO) << "detected " << subgraphs.size() << " subgraph";
@@ -154,11 +158,13 @@ void PatternMatcher::ValidateByNodeRole(
                          if (item.first->IsIntermediate()) {
                            for (auto *x : item.second->inlinks) {
                              if (!ios.count(x)) {
+                               std::cout << "check inlinks, issue node " << item.first->name() << ", x: "<< *x << std::endl;
                                return true;
                              }
                            }
                            for (auto *x : item.second->outlinks) {
                              if (!ios.count(x)) {
+                               std::cout << "check outlinks, issue node " << item.first->name() << ", x: "<< *x  << std::endl;
                                return true;
                              }
                            }

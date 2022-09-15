@@ -32,6 +32,8 @@ void XPUEmbeddingWithEltwiseAddCompute::PrepareForRun() {
     table_lens_cpu_.push_back(table_dims[0]);
     arg_tables_.push_back(table->data<float>());
   }
+
+  VLOG(3) << "XPUEmbeddingWithEltwiseAdd padding_idx: " << param.padding_idx;
 }
 
 void XPUEmbeddingWithEltwiseAddCompute::Run() {
@@ -93,6 +95,8 @@ void XPUEmbeddingWithEltwiseAddCompute::Run() {
           xdnn::VectorParam<int>{int_idx[i].data(), idx_len, nullptr});
     }
   }
+  int padding_idx = GetIntFromEnv("XPU_PADDING_IDX", static_cast<int>(param.padding_idx));
+
   int r = xdnn::multi_embedding_fusion<float, float, int>(
       ctx.GetRawContext(),
       arg_tables_, /* tables */
@@ -102,7 +106,7 @@ void XPUEmbeddingWithEltwiseAddCompute::Run() {
       embed_dim,
       std::vector<float>(table_lens_cpu_.size(), 1.0f),
       std::vector<int>(table_lens_cpu_.size(),
-                       static_cast<int>(param.padding_idx)));
+                       padding_idx));
   CHECK_EQ(r, 0);
 }
 

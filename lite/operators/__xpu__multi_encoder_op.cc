@@ -100,6 +100,14 @@ bool XPUMultiEncoderOp::AttachImpl(const cpp::OpDesc& op_desc,
         const_cast<lite::Tensor*>(&scope->FindVar(name)->Get<lite::Tensor>());
     param_.ln_bias.push_back(t);
   }
+  if (op_desc.HasInput("Cos")) {
+    auto cos_name = op_desc.Input("Cos").front();
+    param_.cos = const_cast<lite::Tensor*>(&scope->FindVar(cos_name)->Get<lite::Tensor>());
+  }
+  if (op_desc.HasInput("Sin")) {
+    auto sin_name = op_desc.Input("Sin").front();
+    param_.sin = const_cast<lite::Tensor*>(&scope->FindVar(sin_name)->Get<lite::Tensor>());
+  }
 
   std::vector<std::string> input_arg_names = op_desc.InputArgumentNames();
   if (std::find(input_arg_names.begin(), input_arg_names.end(), "SeqLod") !=

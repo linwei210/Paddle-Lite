@@ -1268,6 +1268,7 @@ struct SliceParam : ParamBase {
   std::vector<lite::Tensor*> EndsTensorList{};
   const lite::Tensor* StartsTensor{nullptr};
   const lite::Tensor* EndsTensor{nullptr};
+  std::string debug_input_name;
 };
 
 struct AffineChannelParam : ParamBase {
@@ -1740,6 +1741,8 @@ struct XPUMultiEncoderParam : ParamBase {
   const lite::Tensor* mask{nullptr};
   const lite::Tensor* SeqLod{nullptr};
   const lite::Tensor* PadSeqLen{nullptr};
+  const lite::Tensor* cos{nullptr};
+  const lite::Tensor* sin{nullptr};
   lite::Tensor* output{nullptr};
 
   std::vector<int> slice_axes{};
@@ -2290,6 +2293,13 @@ struct RollParam : ParamBase {
   lite::Tensor* Out{};
   std::vector<int64_t> shifts{};
   std::vector<int64_t> axis{};
+};
+
+struct XPURopeParam : ParamBase {
+  lite::Tensor* input{nullptr};
+  const lite::Tensor* cos{nullptr};
+  const lite::Tensor* sin{nullptr};
+  lite::Tensor* output{nullptr};
 };
 
 }  // namespace operators
